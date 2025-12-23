@@ -244,5 +244,8 @@ export interface PolicySettings {
     exclude?: string[];
     allowed?: string[];
   };
+  skills?: {
+    disabled?: string[];
+  };
   mcpServers?: Record<string, { trust?: boolean }>;
 }

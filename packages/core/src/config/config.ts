@@ -298,10 +298,7 @@ export interface ConfigParameters {
   importFormat?: 'tree' | 'flat';
   discoveryMaxDirs?: number;
   compressionThreshold?: number;
-  interactive?: boolean;
-  trustedFolder?: boolean;
-  useRipgrep?: boolean;
-  enableInteractiveShell?: boolean;
+  disabledSkills?: string[];
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   extensionManagement?: boolean;
@@ -458,6 +455,7 @@ export class Config {
     | { [K in HookEventName]?: HookDefinition[] }
     | undefined;
   private readonly disabledHooks: string[];
+  private readonly disabledSkills: string[];
   private experiments: Experiments | undefined;
   private experimentsPromise: Promise<void> | undefined;
   private hookSystem?: HookSystem;
@@ -581,6 +579,7 @@ export class Config {
       (params.hooks && 'disabled' in params.hooks
         ? params.hooks.disabled
         : undefined) ?? [];
+    this.disabledSkills = params.disabledSkills ?? [];
 
     // Enable MessageBus integration if:
     // 1. Explicitly enabled via setting, OR
@@ -731,6 +730,13 @@ export class Config {
     }
 
     await this.getSkillManager().discoverSkills(skillPaths);
+
+    // Filter out disabled skills
+    if (this.disabledSkills.length > 0) {
+      this.getSkillManager().filterSkills(
+        (skill) => !this.disabledSkills.includes(skill.name),
+      );
+    }
 
     // Re-register ActivateSkillTool to update its schema with the discovered skill enums
     if (this.getSkillManager().getSkills().length > 0) {
@@ -915,7 +921,11 @@ export class Config {
   }
 
   getActiveModel(): string {
-    return this._activeModel ?? this.model;
+    return this._activeModel;
+  }
+
+  getDisabledSkills(): string[] {
+    return this.disabledSkills;
   }
 
   setActiveModel(model: string): void {

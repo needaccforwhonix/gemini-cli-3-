@@ -91,6 +91,13 @@ export class SkillManager {
   }
 
   /**
+   * Filters discovered skills by name.
+   */
+  filterSkills(predicate: (skill: SkillMetadata) => boolean): void {
+    this.skills = this.skills.filter(predicate);
+  }
+
+  /**
    * Reads the full content (metadata + body) of a skill by name.
    */
   async getSkillContent(name: string): Promise<SkillContent | null> {

@@ -10,6 +10,7 @@ import { MessageType } from '../types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { CommandContext } from './types.js';
 import type { Config } from '@google/gemini-cli-core';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 describe('skillsCommand', () => {
   let context: CommandContext;
@@ -25,6 +26,11 @@ describe('skillsCommand', () => {
             ]),
           }),
         } as unknown as Config,
+        settings: {
+          merged: { skills: { disabled: [] } },
+          workspace: { path: '/workspace' },
+          setValue: vi.fn(),
+        } as unknown as LoadedSettings,
       },
     });
   });
@@ -54,5 +60,63 @@ describe('skillsCommand', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  describe('disable/enable', () => {
+    beforeEach(() => {
+      context.services.settings.merged.skills = { disabled: [] };
+      (
+        context.services.settings as unknown as { workspace: { path: string } }
+      ).workspace = {
+        path: '/workspace',
+      };
+    });
+
+    it('should disable a skill', async () => {
+      await skillsCommand.action(context, 'disable skill1');
+
+      expect(context.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'skills.disabled',
+        ['skill1'],
+      );
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Skill "skill1" disabled'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should enable a skill', async () => {
+      context.services.settings.merged.skills = { disabled: ['skill1'] };
+      await skillsCommand.action(context, 'enable skill1');
+
+      expect(context.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'skills.disabled',
+        [],
+      );
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Skill "skill1" enabled'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should show error if skill not found during disable', async () => {
+      await skillsCommand.action(context, 'disable non-existent');
+
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: 'Skill "non-existent" not found.',
+        }),
+        expect.any(Number),
+      );
+    });
   });
 });
