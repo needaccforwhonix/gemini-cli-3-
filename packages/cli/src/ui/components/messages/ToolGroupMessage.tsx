@@ -56,7 +56,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
   );
   const isSkillActivation = toolCalls.some(
-    (t) => t.name === ACTIVATE_SKILL_TOOL_NAME || t.name === 'ActivateSkill',
+    (t) =>
+      t.name === ACTIVATE_SKILL_TOOL_NAME ||
+      t.name === 'ActivateSkill' ||
+      t.name.startsWith('Skill: '),
   );
   const borderColor = isSkillActivation
     ? theme.text.accent

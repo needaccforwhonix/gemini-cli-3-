@@ -36,7 +36,10 @@ export const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
     name === SHELL_COMMAND_NAME ||
     name === SHELL_NAME ||
     name === SHELL_TOOL_NAME;
-  const isSkill = name === ACTIVATE_SKILL_TOOL_NAME || name === 'ActivateSkill';
+  const isSkill =
+    name === ACTIVATE_SKILL_TOOL_NAME ||
+    name === 'ActivateSkill' ||
+    name.startsWith('Skill: ');
   const statusColor = isShell ? theme.ui.symbol : theme.status.warning;
   const skillIconColor = theme.text.accent;
 
@@ -91,7 +94,10 @@ export const ToolInfo: React.FC<ToolInfoProps> = ({
   status,
   emphasis,
 }) => {
-  const isSkill = name === ACTIVATE_SKILL_TOOL_NAME || name === 'ActivateSkill';
+  const isSkill =
+    name === ACTIVATE_SKILL_TOOL_NAME ||
+    name === 'ActivateSkill' ||
+    name.startsWith('Skill: ');
   const nameColor = React.useMemo<string>(() => {
     if (isSkill) {
       return theme.text.accent;
@@ -109,9 +115,17 @@ export const ToolInfo: React.FC<ToolInfoProps> = ({
       }
     }
   }, [emphasis, isSkill]);
+
+  const showSkillLabel = isSkill && !name.startsWith('Skill: ');
+
   return (
     <Box overflow="hidden" height={1} flexGrow={1} flexShrink={1}>
       <Text strikethrough={status === ToolCallStatus.Canceled} wrap="truncate">
+        {showSkillLabel && (
+          <Text color={theme.text.accent} bold>
+            Skill Activated:
+          </Text>
+        )}
         <Text color={nameColor} bold>
           {name}
         </Text>{' '}

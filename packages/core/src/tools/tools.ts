@@ -32,6 +32,11 @@ export interface ToolInvocation<
   params: TParams;
 
   /**
+   * The user-friendly display name of the tool.
+   */
+  readonly displayName?: string;
+
+  /**
    * Gets a pre-execution description of the tool operation.
    *
    * @returns A markdown string describing what the tool will do.
@@ -85,7 +90,7 @@ export abstract class BaseToolInvocation<
     readonly params: TParams,
     protected readonly messageBus?: MessageBus,
     readonly _toolName?: string,
-    readonly _toolDisplayName?: string,
+    readonly displayName?: string,
     readonly _serverName?: string,
   ) {}
 
