@@ -94,7 +94,7 @@ describe('<ContextSummaryDisplay />', () => {
     unmount();
   });
 
-  it('renders background process count with Ctrl+B hint', () => {
+  it('renders background process count', () => {
     // Ensure sufficient width so it doesn't wrap or hide
     useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
     const { lastFrame } = render(
@@ -105,7 +105,7 @@ describe('<ContextSummaryDisplay />', () => {
       />,
     );
 
-    expect(lastFrame()).toContain('2 Background processes (Ctrl+B)');
+    expect(lastFrame()).toContain('2 Background processes');
   });
 
   it('renders nothing when all counts are zero', () => {

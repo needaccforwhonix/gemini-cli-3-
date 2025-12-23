@@ -252,7 +252,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               }
             }
 
-            if (shouldUpdate) {
+            if (shouldUpdate && !this.params.is_background) {
               updateOutput(cumulativeOutput);
               lastUpdateTime = Date.now();
             }
