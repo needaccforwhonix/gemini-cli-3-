@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
@@ -84,34 +86,32 @@ export class ActivateSkillTool extends BaseDeclarativeTool<
     private config: Config,
     messageBus?: MessageBus,
   ) {
+    const skills = config.getSkillManager().getSkills();
+    const skillNames = skills.map((s) => s.name);
+
+    let schema: z.ZodTypeAny;
+    if (skillNames.length === 0) {
+      schema = z.object({
+        name: z.string().describe('No skills are currently available.'),
+      });
+    } else {
+      schema = z.object({
+        name: z
+          .enum(skillNames as [string, ...string[]])
+          .describe('The name of the skill to activate.'),
+      });
+    }
+
     super(
       ActivateSkillTool.Name,
       'ActivateSkill',
-      "Activates a specialized agent skill by name. Once activated, the skill's full instructions and rules are permanently added to your system prompt for the remainder of the session. Use this when you identify a task that matches a skill's description.",
+      "Activates a specialized agent skill by name. Once activated, the skill's full instructions and rules are returned as a tool result and injected into the conversation. You MUST strictly follow these instructions for all subsequent turns. Use this when you identify a task that matches a skill's description.",
       Kind.Other,
-      {
-        properties: {
-          name: {
-            description: 'The name of the skill to activate.',
-            type: 'string',
-          },
-        },
-        required: ['name'],
-        type: 'object',
-      },
+      zodToJsonSchema(schema),
       true,
       false,
       messageBus,
     );
-  }
-
-  protected override validateToolParamValues(
-    params: ActivateSkillToolParams,
-  ): string | null {
-    if (!params.name || params.name.trim() === '') {
-      return "The 'name' parameter must be non-empty.";
-    }
-    return null;
   }
 
   protected createInvocation(

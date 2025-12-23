@@ -24,6 +24,13 @@ export class SkillManager {
   private activeSkillNames: Set<string> = new Set();
 
   /**
+   * Clears all discovered skills.
+   */
+  clearSkills(): void {
+    this.skills = [];
+  }
+
+  /**
    * Discovered skills in the provided paths and adds them to the manager.
    * A skill is a directory containing a SKILL.md file at its root.
    */

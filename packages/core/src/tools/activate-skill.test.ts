@@ -36,16 +36,7 @@ describe('ActivateSkillTool', () => {
 
   it('should activate a valid skill and return its content', async () => {
     const params = { name: 'test-skill' };
-    const invocation = (
-      tool as unknown as {
-        createInvocation: (params: unknown) => {
-          execute: (signal: AbortSignal) => Promise<{
-            llmContent: string;
-            returnDisplay: string;
-          }>;
-        };
-      }
-    ).createInvocation(params);
+    const invocation = tool.build(params);
     const result = await invocation.execute(new AbortController().signal);
 
     expect(mockConfig.getSkillManager().activateSkill).toHaveBeenCalledWith(
@@ -58,25 +49,9 @@ describe('ActivateSkillTool', () => {
     expect(result.returnDisplay).toBe('Skill "test-skill" activated.');
   });
 
-  it('should return an error if skill is not found', async () => {
+  it('should throw error if skill is not in enum', async () => {
     const params = { name: 'non-existent' };
-    const invocation = (
-      tool as unknown as {
-        createInvocation: (params: unknown) => {
-          execute: (signal: AbortSignal) => Promise<{
-            llmContent: string;
-            returnDisplay: string;
-          }>;
-        };
-      }
-    ).createInvocation(params);
-    const result = await invocation.execute(new AbortController().signal);
-
-    expect(result.llmContent).toContain(
-      'Error: Skill "non-existent" not found',
-    );
-    expect(result.returnDisplay).toBe('Skill "non-existent" not found.');
-    expect(mockConfig.getSkillManager().activateSkill).not.toHaveBeenCalled();
+    expect(() => tool.build(params as { name: string })).toThrow();
   });
 
   it('should return an error if skill content cannot be read', async () => {
@@ -84,16 +59,7 @@ describe('ActivateSkillTool', () => {
       null,
     );
     const params = { name: 'test-skill' };
-    const invocation = (
-      tool as unknown as {
-        createInvocation: (params: unknown) => {
-          execute: (signal: AbortSignal) => Promise<{
-            llmContent: string;
-            returnDisplay: string;
-          }>;
-        };
-      }
-    ).createInvocation(params);
+    const invocation = tool.build(params);
     const result = await invocation.execute(new AbortController().signal);
 
     expect(result.llmContent).toContain(
@@ -105,6 +71,6 @@ describe('ActivateSkillTool', () => {
   it('should validate that name is provided', () => {
     expect(() =>
       tool.build({ name: '' } as unknown as { name: string }),
-    ).toThrow("The 'name' parameter must be non-empty");
+    ).toThrow();
   });
 });
