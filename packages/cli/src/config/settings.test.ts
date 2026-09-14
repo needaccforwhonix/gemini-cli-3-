@@ -85,6 +85,7 @@ import {
   AuthType,
   type MCPServerConfig,
 } from '@google/gemini-cli-core';
+import * as core from '@google/gemini-cli-core';
 import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
 import {
   getSettingsSchema,
@@ -1106,6 +1107,77 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.mcp).toEqual({
         allowed: ['system-allowed'],
         excluded: ['workspace-excluded'],
+      });
+    });
+
+    describe('LoadedSettings MCP consolidation', () => {
+      it('should consolidate mcp excluded list across all scopes', () => {
+        const loaded = new LoadedSettings(
+          {
+            path: '',
+            settings: { mcp: { excluded: ['system-excluded'] } },
+            originalSettings: {},
+          },
+          {
+            path: '',
+            settings: { mcp: { excluded: ['defaults-excluded'] } },
+            originalSettings: {},
+          },
+          {
+            path: '',
+            settings: { mcp: { excluded: ['user-excluded'] } },
+            originalSettings: {},
+          },
+          {
+            path: '',
+            settings: { mcp: { excluded: ['workspace-excluded'] } },
+            originalSettings: {},
+          },
+          true,
+        );
+
+        expect(loaded.getConsolidatedExcludedMcpServers()).toEqual([
+          'system-excluded',
+          'defaults-excluded',
+          'user-excluded',
+          'workspace-excluded',
+        ]);
+      });
+
+      it('should consolidate allowed mcp list via case-insensitive intersection', () => {
+        const loaded = new LoadedSettings(
+          {
+            path: '',
+            settings: { mcp: { allowed: ['Server-A', 'Server-B'] } },
+            originalSettings: {},
+          },
+          {
+            path: '',
+            settings: { mcp: { allowed: ['server-a', 'Server-C'] } },
+            originalSettings: {},
+          },
+          { path: '', settings: {}, originalSettings: {} }, // no allowlist in user
+          {
+            path: '',
+            settings: { mcp: { allowed: ['SERVER-A', 'Server-D'] } },
+            originalSettings: {},
+          },
+          true,
+        );
+
+        expect(loaded.getConsolidatedAllowedMcpServers()).toEqual(['Server-A']);
+      });
+
+      it('should return undefined allowed list if no scopes define one', () => {
+        const loaded = new LoadedSettings(
+          { path: '', settings: {}, originalSettings: {} },
+          { path: '', settings: {}, originalSettings: {} },
+          { path: '', settings: {}, originalSettings: {} },
+          { path: '', settings: {}, originalSettings: {} },
+          true,
+        );
+
+        expect(loaded.getConsolidatedAllowedMcpServers()).toBeUndefined();
       });
     });
 
@@ -3457,6 +3529,106 @@ MALICIOUS_VAR=allowed-because-trusted
         expect(process.env['GOOGLE_CLOUD_PROJECT']).toBe(
           'attacker-projectinject',
         );
+      });
+    });
+
+    describe('system configuration security', () => {
+      beforeEach(() => {
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+      });
+
+      it('should skip system-defaults.json when insecure and record a warning', () => {
+        resetSettingsCacheForTesting();
+        vi.mocked(fs.existsSync).mockImplementation(
+          (p) => String(p) === getSystemDefaultsPath(),
+        );
+        vi.mocked(fs.readFileSync).mockImplementation((p) => {
+          if (String(p) === getSystemDefaultsPath()) {
+            return JSON.stringify({
+              hooks: {
+                onSessionStart: { command: 'malicious-command.exe' },
+              },
+            });
+          }
+          return '';
+        });
+        vi.spyOn(core, 'isFileAndDirectorySecureSync').mockReturnValue({
+          secure: false,
+          reason:
+            'Directory is insecure. User group Users has write permissions.',
+        });
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.systemDefaults.settings).toEqual({});
+        expect(settings.errors).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              message: expect.stringContaining('Skipping system defaults file'),
+              severity: 'warning',
+            }),
+          ]),
+        );
+      });
+
+      it('should skip system settings.json when insecure and record a warning', () => {
+        resetSettingsCacheForTesting();
+        vi.mocked(fs.existsSync).mockImplementation(
+          (p) => String(p) === getSystemSettingsPath(),
+        );
+        vi.mocked(fs.readFileSync).mockImplementation((p) => {
+          if (String(p) === getSystemSettingsPath()) {
+            return JSON.stringify({
+              hooks: {
+                onSessionStart: { command: 'malicious-command.exe' },
+              },
+            });
+          }
+          return '';
+        });
+        vi.spyOn(core, 'isFileAndDirectorySecureSync').mockReturnValue({
+          secure: false,
+          reason: 'File is not owned by root (uid 0).',
+        });
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.system.settings).toEqual({});
+        expect(settings.errors).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              message: expect.stringContaining('Skipping system settings file'),
+              severity: 'warning',
+            }),
+          ]),
+        );
+      });
+
+      it('should load system-defaults.json when secure', () => {
+        resetSettingsCacheForTesting();
+        vi.mocked(fs.existsSync).mockImplementation(
+          (p) => String(p) === getSystemDefaultsPath(),
+        );
+        vi.mocked(fs.readFileSync).mockImplementation((p) => {
+          if (String(p) === getSystemDefaultsPath()) {
+            return JSON.stringify({
+              ui: { theme: 'corporate-theme' },
+            });
+          }
+          return '';
+        });
+        vi.spyOn(core, 'isFileAndDirectorySecureSync').mockReturnValue({
+          secure: true,
+        });
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.systemDefaults.settings).toEqual({
+          ui: { theme: 'corporate-theme' },
+        });
       });
     });
   });

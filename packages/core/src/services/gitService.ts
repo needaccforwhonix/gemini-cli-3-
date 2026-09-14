@@ -20,9 +20,34 @@ import {
   sanitizeEnvironment,
   getSecureSanitizationConfig,
 } from './environmentSanitization.js';
+import { getSafeGitEnv } from '../utils/gitUtils.js';
 
 export const SHADOW_REPO_AUTHOR_NAME = 'Gemini CLI';
 export const SHADOW_REPO_AUTHOR_EMAIL = 'gemini-cli@google.com';
+
+const SHADOW_REPO_UNSAFE_OPTIONS = {
+  allowUnsafeAlias: true,
+  allowUnsafeAskPass: true,
+  allowUnsafeConfigEnvCount: true,
+  allowUnsafeConfigPaths: true,
+  allowUnsafeCredentialHelper: true,
+  allowUnsafeCustomBinary: true,
+  allowUnsafeDiffExternal: true,
+  allowUnsafeDiffTextConv: true,
+  allowUnsafeEditor: true,
+  allowUnsafeFilter: true,
+  allowUnsafeFsMonitor: true,
+  allowUnsafeGitProxy: true,
+  allowUnsafeGpgProgram: true,
+  allowUnsafeHooksPath: true,
+  allowUnsafeMergeDriver: true,
+  allowUnsafePack: true,
+  allowUnsafePager: true,
+  allowUnsafeProtocolOverride: true,
+  allowUnsafeSshCommand: true,
+  allowUnsafeTemplateDir: true,
+} satisfies NonNullable<SimpleGitOptions['unsafe']> &
+  Record<`allowUnsafe${string}`, boolean>;
 
 /**
  * Common configuration for the shadow Git repository used for checkpointing.
@@ -32,28 +57,7 @@ export const SHADOW_REPO_AUTHOR_EMAIL = 'gemini-cli@google.com';
  * regardless of the user's local environment (e.g., PAGER, EDITOR, or SSH settings).
  */
 const SHADOW_REPO_GIT_OPTIONS: Partial<SimpleGitOptions> = {
-  unsafe: {
-    allowUnsafeAlias: true,
-    allowUnsafeAskPass: true,
-    allowUnsafeConfigEnvCount: true,
-    allowUnsafeConfigPaths: true,
-    allowUnsafeCredentialHelper: true,
-    allowUnsafeCustomBinary: true,
-    allowUnsafeDiffExternal: true,
-    allowUnsafeDiffTextConv: true,
-    allowUnsafeEditor: true,
-    allowUnsafeFilter: true,
-    allowUnsafeFsMonitor: true,
-    allowUnsafeGitProxy: true,
-    allowUnsafeGpgProgram: true,
-    allowUnsafeHooksPath: true,
-    allowUnsafeMergeDriver: true,
-    allowUnsafePack: true,
-    allowUnsafePager: true,
-    allowUnsafeProtocolOverride: true,
-    allowUnsafeSshCommand: true,
-    allowUnsafeTemplateDir: true,
-  },
+  unsafe: SHADOW_REPO_UNSAFE_OPTIONS,
 };
 
 export class GitService {
@@ -88,7 +92,7 @@ export class GitService {
 
   static async verifyGitAvailability(): Promise<boolean> {
     try {
-      await spawnAsync('git', ['--version']);
+      await spawnAsync('git', ['--version'], { env: getSafeGitEnv() });
       return true;
     } catch {
       return false;
@@ -99,11 +103,13 @@ export class GitService {
     const gitConfigPath = path.join(repoDir, '.gitconfig');
     const systemConfigPath = path.join(repoDir, '.gitconfig_system_empty');
     return {
-      ...sanitizeEnvironment(
-        process.env,
-        getSecureSanitizationConfig({
-          enableEnvironmentVariableRedaction: true,
-        }),
+      ...getSafeGitEnv(
+        sanitizeEnvironment(
+          process.env,
+          getSecureSanitizationConfig({
+            enableEnvironmentVariableRedaction: true,
+          }),
+        ),
       ),
       // Prevent git from using the user's global git config.
       GIT_CONFIG_GLOBAL: gitConfigPath,

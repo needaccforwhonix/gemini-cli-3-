@@ -67,6 +67,7 @@ const createMockConfig = (overrides: Partial<Config> = {}): Config =>
     setActiveModel: vi.fn(),
     setModel: vi.fn(),
     activateFallbackMode: vi.fn(),
+    rotateSessionId: vi.fn(),
     getModelAvailabilityService: vi.fn(() =>
       createAvailabilityServiceMock({
         selectedModel: FALLBACK_MODEL,
@@ -191,6 +192,7 @@ describe('handleFallback', () => {
         expect(policyConfig.getFallbackModelHandler).not.toHaveBeenCalled();
         expect(policyConfig.activateFallbackMode).toHaveBeenCalledWith(
           DEFAULT_GEMINI_FLASH_MODEL,
+          undefined,
         );
       } finally {
         chainSpy.mockRestore();
@@ -207,6 +209,9 @@ describe('handleFallback', () => {
         selectedModel: MOCK_PRO_MODEL,
         skipped: [],
       });
+      // Mock activeModel to be unavailable so the utility bypass heuristic is skipped
+      vi.mocked(availability.snapshot).mockReturnValue({ available: false });
+
       policyHandler.mockResolvedValue('retry_once');
 
       await handleFallback(
@@ -351,6 +356,8 @@ describe('handleFallback', () => {
       vi.mocked(policyConfig.getModel).mockReturnValue(
         DEFAULT_GEMINI_MODEL_AUTO,
       );
+      // Mock activeModel to be unavailable so the utility bypass heuristic is skipped
+      vi.mocked(availability.snapshot).mockReturnValue({ available: false });
 
       const result = await handleFallback(
         policyConfig,
@@ -383,6 +390,7 @@ describe('handleFallback', () => {
       expect(result).toBe(true);
       expect(policyConfig.activateFallbackMode).toHaveBeenCalledWith(
         FALLBACK_MODEL,
+        undefined,
       );
       // TODO: add logging expect statement
     });

@@ -55,9 +55,13 @@ vi.mock('node:child_process', () => ({
 }));
 
 const mockQuote = vi.hoisted(() => vi.fn());
-vi.mock('shell-quote', () => ({
-  quote: mockQuote,
-}));
+vi.mock('shell-quote', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('shell-quote')>();
+  return {
+    ...actual,
+    quote: mockQuote,
+  };
+});
 
 const mockDebugLogger = vi.hoisted(() => ({
   error: vi.fn(),
@@ -388,6 +392,12 @@ describe('stripShellWrapper', () => {
   it('should not strip anything if no wrapper is present', () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
   });
+
+  it('should handle multi-line escaped double quotes correctly', () => {
+    const multiLine = 'bash -c "hg commit -m \\"title\n\nbody\\""';
+    const expected = 'hg commit -m "title\n\nbody"';
+    expect(stripShellWrapper(multiLine)).toEqual(expected);
+  });
 });
 
 describe('escapeShellArg', () => {
@@ -486,7 +496,11 @@ describe('getShellConfiguration', () => {
     it('should return PowerShell configuration by default', () => {
       const config = getShellConfiguration();
       expect(config.executable).toBe('powershell.exe');
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.argsPrefix).toEqual([
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+      ]);
       expect(config.shell).toBe('powershell');
     });
 
@@ -511,7 +525,11 @@ describe('getShellConfiguration', () => {
       vi.stubEnv('ComSpec', 'C:\\WINDOWS\\system32\\cmd.exe');
       const config = getShellConfiguration();
       expect(config.executable).toBe('powershell.exe');
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.argsPrefix).toEqual([
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+      ]);
       expect(config.shell).toBe('powershell');
     });
 
@@ -521,7 +539,11 @@ describe('getShellConfiguration', () => {
       vi.stubEnv('ComSpec', psPath);
       const config = getShellConfiguration();
       expect(config.executable).toBe(psPath);
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.argsPrefix).toEqual([
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+      ]);
       expect(config.shell).toBe('powershell');
     });
 
@@ -530,7 +552,11 @@ describe('getShellConfiguration', () => {
       vi.stubEnv('ComSpec', pwshPath);
       const config = getShellConfiguration();
       expect(config.executable).toBe(pwshPath);
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.argsPrefix).toEqual([
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+      ]);
       expect(config.shell).toBe('powershell');
     });
 
@@ -538,7 +564,11 @@ describe('getShellConfiguration', () => {
       vi.stubEnv('ComSpec', 'C:\\Path\\To\\POWERSHELL.EXE');
       const config = getShellConfiguration();
       expect(config.executable).toBe('C:\\Path\\To\\POWERSHELL.EXE');
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
+      expect(config.argsPrefix).toEqual([
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+      ]);
       expect(config.shell).toBe('powershell');
     });
   });

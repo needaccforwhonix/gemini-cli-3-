@@ -6,6 +6,7 @@
 
 import {
   createUserContent,
+  type Content,
   type PartListUnion,
   type GenerateContentResponse,
   type FunctionCall,
@@ -104,6 +105,19 @@ export type ServerGeminiContextWindowWillOverflowEvent = {
 
 export type ServerGeminiInvalidStreamEvent = {
   type: GeminiEventType.InvalidStream;
+  value: {
+    type:
+      | 'NO_FINISH_REASON'
+      | 'NO_RESPONSE_TEXT'
+      | 'MALFORMED_FUNCTION_CALL'
+      | 'UNEXPECTED_TOOL_CALL'
+      | 'MAX_TOKENS_EXCEEDED'
+      | 'SAFETY_BLOCKED'
+      | 'RECITATION_BLOCKED'
+      | 'OTHER_BLOCKED'
+      | 'THINKING_ONLY_RESPONSE';
+    message: string;
+  };
 };
 
 export type ServerGeminiModelInfoEvent = {
@@ -257,9 +271,13 @@ export class Turn {
     modelConfigKey: ModelConfigKey,
     req: PartListUnion,
     signal: AbortSignal,
-    displayContent?: PartListUnion,
-    role: LlmRole = LlmRole.MAIN,
+    options: {
+      displayContent?: PartListUnion;
+      role?: LlmRole;
+      apiHistoryOverride?: Content[];
+    } = {},
   ): AsyncGenerator<ServerGeminiStreamEvent> {
+    const { displayContent, role = LlmRole.MAIN, apiHistoryOverride } = options;
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
@@ -270,6 +288,7 @@ export class Turn {
         signal,
         role,
         displayContent,
+        apiHistoryOverride,
       );
 
       for await (const streamEvent of responseStream) {
@@ -402,7 +421,13 @@ export class Turn {
       }
 
       if (e instanceof InvalidStreamError) {
-        yield { type: GeminiEventType.InvalidStream };
+        yield {
+          type: GeminiEventType.InvalidStream,
+          value: {
+            type: e.type,
+            message: e.message,
+          },
+        };
         return;
       }
 

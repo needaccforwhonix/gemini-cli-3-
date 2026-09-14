@@ -49,7 +49,7 @@ import {
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
-import { XcodeMcpBridgeFixTransport } from './xcode-mcp-fix-transport.js';
+import { McpComplianceTransport } from './mcp-compliance-transport.js';
 
 import type { CallableTool, FunctionCall, Part, Tool } from '@google/genai';
 import { basename } from 'node:path';
@@ -84,6 +84,7 @@ import { validateMcpPolicyToolNames } from '../policy/toml-loader.js';
 import {
   sanitizeEnvironment,
   type EnvironmentSanitizationConfig,
+  isDangerousExecutionEnvironmentVariable,
 } from '../services/environmentSanitization.js';
 import { expandEnvVars } from '../utils/envExpansion.js';
 
@@ -1055,7 +1056,7 @@ async function createTransportWithOAuth(
   mcpServerConfig: MCPServerConfig,
   accessToken: string,
   cliConfig: McpContext,
-): Promise<StreamableHTTPClientTransport | SSEClientTransport | null> {
+): Promise<Transport | null> {
   try {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
@@ -1070,7 +1071,12 @@ async function createTransportWithOAuth(
       ),
     };
 
-    return createUrlTransport(mcpServerName, mcpServerConfig, transportOptions);
+    const transport = createUrlTransport(
+      mcpServerName,
+      mcpServerConfig,
+      transportOptions,
+    );
+    return transport ? new McpComplianceTransport(transport) : null;
   } catch (error) {
     cliConfig.emitMcpDiagnostic(
       'error',
@@ -1143,10 +1149,12 @@ class LenientJsonSchemaValidator implements jsonSchemaValidator {
     try {
       return this.ajvValidator.getValidator<T>(schema);
     } catch (error) {
+      let id = '<no $id>';
+      if (schema && typeof schema === 'object' && '$id' in schema) {
+        id = String(schema.$id);
+      }
       debugLogger.warn(
-        `Failed to compile MCP tool output schema (${
-          (schema as Record<string, unknown>)?.['$id'] ?? '<no $id>'
-        }): ${error instanceof Error ? error.message : String(error)}. ` +
+        `Failed to compile MCP tool output schema (${id}): ${error instanceof Error ? error.message : String(error)}. ` +
           'Skipping output validation for this tool.',
       );
       return (input: unknown) => ({
@@ -1399,6 +1407,7 @@ export async function discoverTools(
         error,
         mcpServerName,
       );
+      throw error;
     }
     return [];
   }
@@ -2318,7 +2327,9 @@ export async function createTransport(
       authProvider,
     };
 
-    return createUrlTransport(mcpServerName, mcpServerConfig, transportOptions);
+    return new McpComplianceTransport(
+      createUrlTransport(mcpServerName, mcpServerConfig, transportOptions),
+    );
   }
 
   if (mcpServerConfig.command) {
@@ -2350,36 +2361,36 @@ export async function createTransport(
     // Expand and merge explicit environment variables from the MCP configuration.
     if (mcpServerConfig.env) {
       for (const [key, value] of Object.entries(mcpServerConfig.env)) {
-        finalEnv[key] = expandEnvVars(value, expansionEnv);
+        if (value === undefined) {
+          continue;
+        }
+        if (isDangerousExecutionEnvironmentVariable(key)) {
+          debugLogger.warn(
+            `Blocked dangerous environment variable override for MCP server '${mcpServerName}': ${key}`,
+          );
+          continue;
+        }
+        finalEnv[key] = expandEnvVars(value, sanitizedEnv);
       }
     }
 
-    let transport: Transport = new StdioClientTransport({
-      command: mcpServerConfig.command,
-      args: mcpServerConfig.args || [],
-      env: finalEnv,
-      cwd: mcpServerConfig.cwd,
-      stderr: 'pipe',
-    });
-
-    // Fix for Xcode 26.3 mcpbridge non-compliant responses
-    // It returns JSON in `content` instead of `structuredContent`
-    if (
-      mcpServerConfig.command === 'xcrun' &&
-      mcpServerConfig.args?.includes('mcpbridge')
-    ) {
-      transport = new XcodeMcpBridgeFixTransport(transport);
-    }
+    const transport: Transport = new McpComplianceTransport(
+      new StdioClientTransport({
+        command: mcpServerConfig.command,
+        args: mcpServerConfig.args || [],
+        env: finalEnv,
+        cwd: mcpServerConfig.cwd,
+        stderr: 'pipe',
+      }),
+    );
 
     if (debugMode) {
-      // The `XcodeMcpBridgeFixTransport` wrapper hides the underlying `StdioClientTransport`,
+      // The `McpComplianceTransport` wrapper hides the underlying `StdioClientTransport`,
       // which exposes `stderr` for debug logging. We need to unwrap it to attach the listener.
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const underlyingTransport =
-        transport instanceof XcodeMcpBridgeFixTransport
-          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-type-assertion
-            (transport as any).transport
+        transport instanceof McpComplianceTransport
+          ? transport.transport
           : transport;
 
       if (
@@ -2413,7 +2424,13 @@ function getExtensionEnvironment(
   const env: Record<string, string> = {};
   if (extension?.resolvedSettings) {
     for (const setting of extension.resolvedSettings) {
-      if (setting.value !== undefined) {
+      if (setting.value !== undefined && typeof setting.envVar === 'string') {
+        if (isDangerousExecutionEnvironmentVariable(setting.envVar)) {
+          debugLogger.warn(
+            `Blocked restricted environment variable override in extension settings: ${setting.envVar}`,
+          );
+          continue;
+        }
         env[setting.envVar] = setting.value;
       }
     }

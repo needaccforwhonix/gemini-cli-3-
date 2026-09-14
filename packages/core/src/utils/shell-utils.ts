@@ -7,7 +7,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { quote, type ParseEntry } from 'shell-quote';
+import { quote, parse, type ParseEntry } from 'shell-quote';
 import {
   spawn,
   spawnSync,
@@ -657,6 +657,11 @@ export function parseCommandDetails(
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
+    // -NonInteractive prevents PSReadLine from intercepting console input
+    // events inside the ConPTY session, which otherwise causes interactive
+    // TUI tools (e.g. pnpm create vite, vim) to receive malformed key events
+    // and exit when arrow keys are pressed.
+    const powershellArgsPrefix = ['-NoProfile', '-NonInteractive', '-Command'];
     const comSpec = process.env['ComSpec'];
     if (comSpec) {
       const executable = comSpec.toLowerCase();
@@ -666,7 +671,7 @@ export function getShellConfiguration(): ShellConfiguration {
       ) {
         return {
           executable: comSpec,
-          argsPrefix: ['-NoProfile', '-Command'],
+          argsPrefix: powershellArgsPrefix,
           shell: 'powershell',
         };
       }
@@ -684,7 +689,7 @@ export function getShellConfiguration(): ShellConfiguration {
     // Fall back to Windows PowerShell 5.1 when pwsh.exe is not installed.
     return {
       executable: 'powershell.exe',
-      argsPrefix: ['-NoProfile', '-Command'],
+      argsPrefix: powershellArgsPrefix,
       shell: 'powershell',
     };
   }
@@ -841,10 +846,26 @@ export function stripShellWrapper(command: string): string {
   if (match) {
     let newCommand = command.substring(match[0].length).trim();
     if (
-      (newCommand.startsWith('"') && newCommand.endsWith('"')) ||
-      (newCommand.startsWith("'") && newCommand.endsWith("'"))
+      newCommand.length >= 2 &&
+      ((newCommand.startsWith('"') && newCommand.endsWith('"')) ||
+        (newCommand.startsWith("'") && newCommand.endsWith("'")))
     ) {
-      newCommand = newCommand.substring(1, newCommand.length - 1);
+      const isPosixShell = match[0].trim().endsWith('-c');
+      if (isPosixShell && newCommand.startsWith('"')) {
+        try {
+          const parsed = parse(newCommand, (key) => '$' + key);
+          const firstEntry = parsed[0];
+          if (parsed.length === 1 && typeof firstEntry === 'string') {
+            newCommand = firstEntry;
+          } else {
+            newCommand = newCommand.substring(1, newCommand.length - 1);
+          }
+        } catch {
+          newCommand = newCommand.substring(1, newCommand.length - 1);
+        }
+      } else {
+        newCommand = newCommand.substring(1, newCommand.length - 1);
+      }
     }
     return newCommand;
   }

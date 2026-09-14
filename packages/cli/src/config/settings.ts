@@ -21,6 +21,8 @@ import {
   AuthType,
   type AdminControlsSettings,
   createCache,
+  isFileAndDirectorySecureSync,
+  createPathSecurityCache,
 } from '@google/gemini-cli-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/builtin/light/default-light.js';
@@ -509,6 +511,51 @@ export class LoadedSettings {
     this._remoteAdminSettings = { admin };
     this._merged = this.computeMergedSettings();
   }
+
+  /**
+   * Returns a consolidated list of excluded MCP servers across all settings files.
+   */
+  getConsolidatedExcludedMcpServers(): string[] {
+    const scopes = [
+      this.system,
+      this.systemDefaults,
+      this.user,
+      this.workspace,
+    ];
+    return scopes.flatMap((scope) => {
+      const excluded = scope?.settings?.mcp?.excluded;
+      return Array.isArray(excluded) ? excluded : [];
+    });
+  }
+
+  /**
+   * Returns a consolidated list of allowed MCP servers (via intersection of all defined lists).
+   */
+  getConsolidatedAllowedMcpServers(): string[] | undefined {
+    const scopes = [
+      this.system,
+      this.systemDefaults,
+      this.user,
+      this.workspace,
+    ];
+    const definedAllowlists = scopes.flatMap((scope) => {
+      const allowed = scope?.settings?.mcp?.allowed;
+      return Array.isArray(allowed) ? [allowed] : [];
+    });
+
+    if (definedAllowlists.length === 0) {
+      return undefined;
+    }
+
+    return definedAllowlists.reduce((acc, current) => {
+      const normalizedCurrent = new Set(
+        current.map((item) => item.toLowerCase().trim()),
+      );
+      return acc.filter((item) =>
+        normalizedCurrent.has(item.toLowerCase().trim()),
+      );
+    });
+  }
 }
 
 function findEnvFile(
@@ -799,8 +846,34 @@ function _doLoadSettings(workspaceDir: string): LoadedSettings {
     return { settings: {}, rawSettings: {} };
   };
 
-  const systemResult = load(systemSettingsPath);
-  const systemDefaultsResult = load(systemDefaultsPath);
+  const securityCache = createPathSecurityCache();
+
+  const loadSystemFile = (
+    filePath: string,
+    fileLabel: string,
+  ): { settings: Settings; rawSettings: Settings; rawJson?: string } => {
+    if (!fs.existsSync(filePath)) {
+      return { settings: {}, rawSettings: {} };
+    }
+
+    const check = isFileAndDirectorySecureSync(filePath, securityCache);
+    if (!check.secure) {
+      settingsErrors.push({
+        message: `Security Warning: Skipping ${fileLabel} file '${filePath}': ${check.reason}`,
+        path: filePath,
+        severity: 'warning',
+      });
+      return { settings: {}, rawSettings: {} };
+    }
+
+    return load(filePath);
+  };
+
+  const systemResult = loadSystemFile(systemSettingsPath, 'system settings');
+  const systemDefaultsResult = loadSystemFile(
+    systemDefaultsPath,
+    'system defaults',
+  );
   const userResult = load(USER_SETTINGS_PATH);
 
   let workspaceResult: {
@@ -853,7 +926,7 @@ function _doLoadSettings(workspaceDir: string): LoadedSettings {
   );
   const isTrusted =
     isWorkspaceTrusted(initialTrustCheckSettings as Settings, workspaceDir)
-      .isTrusted ?? false;
+      ?.isTrusted ?? false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

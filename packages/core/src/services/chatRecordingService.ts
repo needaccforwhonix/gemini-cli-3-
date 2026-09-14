@@ -12,7 +12,7 @@ import { sanitizeFilenamePart } from '../utils/fileUtils.js';
 import { isNodeError } from '../utils/errors.js';
 import {
   deleteSessionArtifactsAsync,
-  deleteSubagentSessionDirAndArtifactsAsync,
+  deleteStoredSession,
 } from '../utils/sessionOperations.js';
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
@@ -23,6 +23,8 @@ import type {
 import { debugLogger } from '../utils/debugLogger.js';
 import type { AgentLoopContext } from '../config/agent-loop-context.js';
 import type { HistoryTurn } from '../core/agentChatHistory.js';
+import { partListUnionToString } from '../core/geminiRequest.js';
+import { isIgnoredUserContent } from '../utils/sessionUtils.js';
 import {
   SESSION_FILE_PREFIX,
   type TokensSummary,
@@ -98,8 +100,34 @@ function isTextPart(part: unknown): part is { text: string } {
   return isStringProperty(part, 'text');
 }
 
-function isSessionIdRecord(record: unknown): record is { sessionId: string } {
-  return isStringProperty(record, 'sessionId');
+/**
+ * Returns true when a stored message represents conversation content worth
+ * surfacing in resume flows.
+ */
+export function isResumableMessageRecord(message: MessageRecord): boolean {
+  const contentString = message.content
+    ? partListUnionToString(message.content)
+    : '';
+
+  if (message.type === 'user') {
+    return !isIgnoredUserContent(contentString.trim());
+  }
+
+  if (message.type === 'gemini') {
+    return (
+      contentString.trim().length > 0 ||
+      (message.toolCalls?.length ?? 0) > 0 ||
+      (message.thoughts?.length ?? 0) > 0
+    );
+  }
+
+  return false;
+}
+
+export function hasResumableConversationContent(
+  messages: readonly MessageRecord[],
+): boolean {
+  return messages.some((message) => isResumableMessageRecord(message));
 }
 
 export async function loadConversationRecord(
@@ -110,7 +138,7 @@ export async function loadConversationRecord(
       messageCount?: number;
       userMessageCount?: number;
       firstUserMessage?: string;
-      hasUserOrAssistantMessage?: boolean;
+      hasResumableContent?: boolean;
       memoryScratchpadIsStale?: boolean;
     })
   | null
@@ -131,7 +159,7 @@ export async function loadConversationRecord(
     const messageIds: string[] = [];
     const messageKinds = new Map<
       string,
-      { isUser: boolean; isUserOrAssistant: boolean }
+      { isUser: boolean; isResumable: boolean }
     >();
     let isTrackingMemoryScratchpadFreshness = false;
     let memoryScratchpadIsStale = false;
@@ -178,19 +206,18 @@ export async function loadConversationRecord(
           }
           const id = record.id;
           const isUser = hasProperty(record, 'type') && record.type === 'user';
-          const isUserOrAssistant =
-            hasProperty(record, 'type') &&
-            (record.type === 'user' || record.type === 'gemini');
+          const isResumable = isResumableMessageRecord(record);
           // Track message count and first user message
           if (options?.metadataOnly) {
             messageIds.push(id);
-            messageKinds.set(id, { isUser, isUserOrAssistant });
+            messageKinds.set(id, { isUser, isResumable });
           }
           if (
             !firstUserMessageStr &&
             isUser &&
             hasProperty(record, 'content') &&
-            record['content']
+            record['content'] &&
+            isResumable
           ) {
             // Basic extraction of first user message for display
             const rawContent = record['content'];
@@ -220,14 +247,98 @@ export async function loadConversationRecord(
             );
             memoryScratchpadIsStale = false;
           }
+          if (
+            hasProperty(record.$set, 'messages') &&
+            Array.isArray(record.$set.messages)
+          ) {
+            // Checkpoint: clear and rebuild from the provided messages array
+            messagesMap.clear();
+            if (options?.metadataOnly) {
+              messageIds.length = 0;
+              messageKinds.clear();
+            }
+            for (const msg of record.$set.messages) {
+              if (isMessageRecord(msg)) {
+                const id = msg.id;
+                const isUser = msg.type === 'user';
+                const isResumable = isResumableMessageRecord(msg);
+
+                if (options?.metadataOnly) {
+                  messageIds.push(id);
+                  messageKinds.set(id, {
+                    isUser,
+                    isResumable,
+                  });
+                } else {
+                  messagesMap.set(id, msg);
+                }
+
+                if (
+                  !firstUserMessageStr &&
+                  isUser &&
+                  isResumable &&
+                  msg.content &&
+                  (Array.isArray(msg.content) ||
+                    typeof msg.content === 'string')
+                ) {
+                  if (Array.isArray(msg.content)) {
+                    firstUserMessageStr = msg.content
+                      .map((p: unknown) => (isTextPart(p) ? p.text : ''))
+                      .join('');
+                  } else {
+                    firstUserMessageStr = msg.content;
+                  }
+                }
+              }
+            }
+          }
           // Metadata update
           metadata = {
             ...metadata,
             ...record.$set,
           };
         } else if (isPartialMetadataRecord(record)) {
-          // Initial metadata line
+          // Initial metadata line (or entire legacy record if on one line)
           metadata = { ...metadata, ...record };
+          if (
+            hasProperty(record, 'messages') &&
+            Array.isArray(record.messages)
+          ) {
+            for (const msg of record.messages) {
+              if (isMessageRecord(msg)) {
+                const id = msg.id;
+                const isUser = msg.type === 'user';
+                const isResumable = isResumableMessageRecord(msg);
+
+                if (options?.metadataOnly) {
+                  messageIds.push(id);
+                  messageKinds.set(id, {
+                    isUser,
+                    isResumable,
+                  });
+                } else {
+                  messagesMap.set(id, msg);
+                }
+
+                if (
+                  !firstUserMessageStr &&
+                  isUser &&
+                  isResumable &&
+                  msg.content &&
+                  (Array.isArray(msg.content) ||
+                    typeof msg.content === 'string')
+                ) {
+                  if (Array.isArray(msg.content)) {
+                    firstUserMessageStr = msg.content
+                      .map((p: unknown) => (isTextPart(p) ? p.text : ''))
+                      .join('');
+                  } else {
+                    firstUserMessageStr = msg.content;
+                  }
+                }
+              }
+            }
+          }
         }
       } catch {
         // ignore parse errors on individual lines
@@ -238,15 +349,12 @@ export async function loadConversationRecord(
       return await parseLegacyRecordFallback(filePath, options);
     }
 
-    const metadataMessages = Array.isArray(metadata.messages)
-      ? metadata.messages
-      : [];
-    const loadedMessages =
-      metadataMessages.length > 0
-        ? metadataMessages
-        : Array.from(messagesMap.values());
+    const loadedMessages = Array.from(messagesMap.values());
     const metadataFirstUserMessage =
-      metadataMessages.find((message) => message.type === 'user') ?? null;
+      loadedMessages.find(
+        (message) =>
+          message.type === 'user' && isResumableMessageRecord(message),
+      ) ?? null;
     let fallbackFirstUserMessage = firstUserMessageStr;
     if (!fallbackFirstUserMessage && metadataFirstUserMessage) {
       const rawContent = metadataFirstUserMessage.content;
@@ -261,9 +369,9 @@ export async function loadConversationRecord(
     const userMessageCount = options?.metadataOnly
       ? Array.from(messageKinds.values()).filter((m) => m.isUser).length
       : loadedMessages.filter((m) => m.type === 'user').length;
-    const hasUserOrAssistant = options?.metadataOnly
-      ? Array.from(messageKinds.values()).some((m) => m.isUserOrAssistant)
-      : loadedMessages.some((m) => m.type === 'user' || m.type === 'gemini');
+    const hasResumableContent = options?.metadataOnly
+      ? Array.from(messageKinds.values()).some((m) => m.isResumable)
+      : hasResumableConversationContent(loadedMessages);
 
     return {
       sessionId: metadata.sessionId,
@@ -276,22 +384,14 @@ export async function loadConversationRecord(
       kind: metadata.kind,
       messages: options?.metadataOnly ? [] : loadedMessages,
       messageCount: options?.metadataOnly
-        ? metadataMessages.length || messageIds.length
+        ? loadedMessages.length || messageIds.length
         : loadedMessages.length,
-      userMessageCount:
-        options?.metadataOnly && metadataMessages.length > 0
-          ? metadataMessages.filter((m) => m.type === 'user').length
-          : userMessageCount,
+      userMessageCount,
       memoryScratchpadIsStale: isTrackingMemoryScratchpadFreshness
         ? memoryScratchpadIsStale
         : undefined,
       firstUserMessage: fallbackFirstUserMessage,
-      hasUserOrAssistantMessage:
-        options?.metadataOnly && metadataMessages.length > 0
-          ? metadataMessages.some(
-              (m) => m.type === 'user' || m.type === 'gemini',
-            )
-          : hasUserOrAssistant,
+      hasResumableContent,
     };
   } catch (error) {
     debugLogger.error('Error loading conversation record from JSONL:', error);
@@ -362,7 +462,16 @@ export class ChatRecordingService {
           // Update the session ID in the existing file
           this.updateMetadata({ sessionId: this.sessionId });
         } else {
-          throw new Error('Failed to load resumed session data from file');
+          // The file could not be reloaded (missing, corrupt metadata, or an
+          // I/O error). Fall back to the in-memory conversation we were handed
+          // rather than failing the caller, and rewrite a clean file from it.
+          debugLogger.warn(
+            'Failed to reload resumed session data from file; falling back ' +
+              'to the in-memory conversation.',
+          );
+          this.cachedConversation = resumedSessionData.conversation;
+          this.projectHash = this.cachedConversation.projectHash;
+          this.rewriteConversationFile(this.cachedConversation);
         }
       } else {
         // Create new session
@@ -453,6 +562,73 @@ export class ChatRecordingService {
       const line = JSON.stringify(record) + '\n';
       fs.mkdirSync(path.dirname(this.conversationFile), { recursive: true });
       fs.appendFileSync(this.conversationFile, line);
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOSPC') {
+        this.conversationFile = null;
+        debugLogger.warn(ENOSPC_WARNING_MESSAGE);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Rewrites the session file from an in-memory record. Any existing
+   * (unreadable) file is preserved alongside rather than destroyed, and the
+   * new file is written atomically (temp file + rename).
+   */
+  private rewriteConversationFile(conversation: ConversationRecord): void {
+    if (!this.conversationFile) return;
+
+    // Normalize legacy `.json` paths to the `.jsonl` format we write.
+    if (this.conversationFile.endsWith('.json')) {
+      this.conversationFile = this.conversationFile + 'l';
+    }
+
+    const { messages, memoryScratchpad, ...metadata } = conversation;
+    const lines: string[] = [JSON.stringify(metadata)];
+    for (const msg of messages) {
+      lines.push(JSON.stringify(msg));
+    }
+    if (memoryScratchpad) {
+      lines.push(JSON.stringify({ $set: { memoryScratchpad } }));
+    }
+    const content = lines.join('\n') + '\n';
+
+    try {
+      fs.mkdirSync(path.dirname(this.conversationFile), { recursive: true });
+
+      // The existing file was unreadable, but it may have been only
+      // transiently so (a lock or I/O blip) rather than truly corrupt. Keep
+      // its bytes rather than destroying them.
+      if (fs.existsSync(this.conversationFile)) {
+        const backup = `${this.conversationFile}.unreadable-${Date.now()}`;
+        try {
+          fs.renameSync(this.conversationFile, backup);
+          debugLogger.warn(
+            `Preserved the unreadable session file at ${backup}.`,
+          );
+        } catch (backupError) {
+          debugLogger.error(
+            'Failed to preserve the unreadable session file.',
+            backupError,
+          );
+        }
+      }
+
+      const tempFile = `${this.conversationFile}.tmp-${process.pid}`;
+      try {
+        fs.writeFileSync(tempFile, content);
+        fs.renameSync(tempFile, this.conversationFile);
+      } catch (error) {
+        // The rename did not complete, so the temp file would be left behind.
+        try {
+          fs.unlinkSync(tempFile);
+        } catch {
+          // Ignore cleanup errors so the original failure still surfaces.
+        }
+        throw error;
+      }
     } catch (error) {
       if (isNodeError(error) && error.code === 'ENOSPC') {
         this.conversationFile = null;
@@ -702,140 +878,7 @@ export class ChatRecordingService {
    * @throws {Error} If shortId validation fails.
    */
   async deleteSession(sessionIdOrBasename: string): Promise<void> {
-    try {
-      const tempDir = this.context.config.storage.getProjectTempDir();
-      const chatsDir = path.join(tempDir, 'chats');
-      const shortId = this.deriveShortId(sessionIdOrBasename);
-
-      // Using stat instead of existsSync for async sanity
-      if (!(await fs.promises.stat(chatsDir).catch(() => null))) {
-        return; // Nothing to delete
-      }
-
-      const matchingFiles = await this.getMatchingSessionFiles(
-        chatsDir,
-        shortId,
-      );
-      for (const file of matchingFiles) {
-        await this.deleteSessionAndArtifacts(chatsDir, file, tempDir);
-      }
-    } catch (error) {
-      debugLogger.error('Error deleting session file.', error);
-      throw error;
-    }
-  }
-
-  private deriveShortId(sessionIdOrBasename: string): string {
-    let shortId = sessionIdOrBasename;
-    if (sessionIdOrBasename.startsWith(SESSION_FILE_PREFIX)) {
-      const withoutExt = sessionIdOrBasename.replace(/\.jsonl?$/, '');
-      const parts = withoutExt.split('-');
-      shortId = parts[parts.length - 1];
-    } else if (sessionIdOrBasename.length >= 8) {
-      shortId = sessionIdOrBasename.slice(0, 8);
-    } else {
-      throw new Error('Invalid sessionId or basename provided for deletion');
-    }
-
-    if (shortId.length !== 8) {
-      throw new Error('Derived shortId must be exactly 8 characters');
-    }
-
-    return shortId;
-  }
-
-  private async getMatchingSessionFiles(
-    chatsDir: string,
-    shortId: string,
-  ): Promise<string[]> {
-    const files = await fs.promises.readdir(chatsDir);
-    return files.filter(
-      (f) =>
-        f.startsWith(SESSION_FILE_PREFIX) &&
-        (f.endsWith(`-${shortId}.json`) || f.endsWith(`-${shortId}.jsonl`)),
-    );
-  }
-
-  /**
-   * Deletes a single session file and its associated logs, tool-outputs, and directory.
-   */
-  private async deleteSessionAndArtifacts(
-    chatsDir: string,
-    file: string,
-    tempDir: string,
-  ): Promise<void> {
-    const filePath = path.join(chatsDir, file);
-    let fullSessionId: string | undefined;
-
-    try {
-      const CHUNK_SIZE = 4096;
-      const buffer = Buffer.alloc(CHUNK_SIZE);
-      let firstLine: string;
-      let fd: fs.promises.FileHandle | undefined;
-      try {
-        fd = await fs.promises.open(filePath, 'r');
-        const { bytesRead } = await fd.read(buffer, 0, CHUNK_SIZE, 0);
-        if (bytesRead > 0) {
-          const contentChunk = buffer.toString('utf8', 0, bytesRead);
-          const newlineIndex = contentChunk.indexOf('\n');
-          firstLine =
-            newlineIndex !== -1
-              ? contentChunk.substring(0, newlineIndex)
-              : contentChunk;
-
-          try {
-            const content = JSON.parse(firstLine) as unknown;
-            if (isSessionIdRecord(content)) {
-              fullSessionId = content.sessionId;
-            }
-          } catch {
-            // If first line parse fails, it might be a legacy pretty-printed JSON.
-            // We'll fall back to full file read below.
-          }
-        }
-      } finally {
-        if (fd !== undefined) {
-          await fd.close();
-        }
-      }
-
-      // Fallback for legacy JSON files if we couldn't get sessionId from first line
-      if (!fullSessionId) {
-        try {
-          const fileContent = await fs.promises.readFile(filePath, 'utf8');
-          const parsed = JSON.parse(fileContent) as unknown;
-          if (isSessionIdRecord(parsed)) {
-            fullSessionId = parsed.sessionId;
-          }
-        } catch {
-          // Ignore parse errors, we'll still try to unlink the file
-        }
-      }
-
-      if (fullSessionId) {
-        // Delegate to shared utility!
-        await deleteSessionArtifactsAsync(fullSessionId, tempDir);
-        await deleteSubagentSessionDirAndArtifactsAsync(
-          fullSessionId,
-          chatsDir,
-          tempDir,
-        );
-      }
-    } catch (error) {
-      debugLogger.error(
-        `Error deleting artifacts for session file ${file}:`,
-        error,
-      );
-    } finally {
-      // ALWAYS try to delete the session file itself
-      try {
-        await fs.promises.unlink(filePath);
-      } catch (error) {
-        if (isNodeError(error) && error.code !== 'ENOENT') {
-          debugLogger.error(`Error unlinking session file ${file}:`, error);
-        }
-      }
-    }
+    return deleteStoredSession(this.context.config, sessionIdOrBasename);
   }
 
   /**
@@ -862,6 +905,23 @@ export class ChatRecordingService {
       debugLogger.error('Error deleting current session.', error);
       throw error;
     }
+  }
+
+  /**
+   * Deletes the current session only if it has no resumable conversation
+   * content. This removes abandoned startup-only sessions while preserving any
+   * session with a real user prompt, model response, or tool activity.
+   */
+  async deleteCurrentSessionIfNotResumableAsync(): Promise<void> {
+    if (!this.conversationFile || !this.cachedConversation) {
+      return;
+    }
+
+    if (hasResumableConversationContent(this.cachedConversation.messages)) {
+      return;
+    }
+
+    await this.deleteCurrentSessionAsync();
   }
 
   /**
@@ -986,7 +1046,7 @@ async function parseLegacyRecordFallback(
       messageCount?: number;
       userMessageCount?: number;
       firstUserMessage?: string;
-      hasUserOrAssistantMessage?: boolean;
+      hasResumableContent?: boolean;
     })
   | null
 > {
@@ -1002,7 +1062,7 @@ async function parseLegacyRecordFallback(
       if (options?.metadataOnly) {
         let fallbackFirstUserMessageStr: string | undefined;
         const firstUserMessage = legacyRecord.messages?.find(
-          (m) => m.type === 'user',
+          (m) => m.type === 'user' && isResumableMessageRecord(m),
         );
         if (firstUserMessage) {
           const rawContent = firstUserMessage.content;
@@ -1021,20 +1081,18 @@ async function parseLegacyRecordFallback(
           userMessageCount:
             legacyRecord.messages?.filter((m) => m.type === 'user').length || 0,
           firstUserMessage: fallbackFirstUserMessageStr,
-          hasUserOrAssistantMessage:
-            legacyRecord.messages?.some(
-              (m) => m.type === 'user' || m.type === 'gemini',
-            ) || false,
+          hasResumableContent:
+            legacyRecord.messages?.some((m) => isResumableMessageRecord(m)) ||
+            false,
         };
       }
       return {
         ...legacyRecord,
         userMessageCount:
           legacyRecord.messages?.filter((m) => m.type === 'user').length || 0,
-        hasUserOrAssistantMessage:
-          legacyRecord.messages?.some(
-            (m) => m.type === 'user' || m.type === 'gemini',
-          ) || false,
+        hasResumableContent:
+          legacyRecord.messages?.some((m) => isResumableMessageRecord(m)) ||
+          false,
       };
     }
   } catch {

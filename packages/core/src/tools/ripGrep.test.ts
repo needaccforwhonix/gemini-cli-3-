@@ -46,7 +46,7 @@ vi.mock('../utils/paths.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/paths.js')>();
   return {
     ...actual,
-    resolveToRealPath: vi.fn((p) => p),
+    resolveToRealPath: vi.fn((p) => actual.resolveToRealPath(p)),
     normalizePath: vi.fn((p) =>
       typeof p === 'string' ? p.replace(/\\/g, '/') : p,
     ),
@@ -1351,7 +1351,9 @@ describe('RipGrepTool', () => {
     });
 
     it('should add .geminiignore when enabled and patterns exist', async () => {
-      const geminiIgnorePath = path.join(tempRootDir, GEMINI_IGNORE_FILE_NAME);
+      const geminiIgnorePath = resolveToRealPath(
+        path.join(tempRootDir, GEMINI_IGNORE_FILE_NAME),
+      );
       await fs.writeFile(geminiIgnorePath, 'ignored.log');
 
       const configWithGeminiIgnore = createMockConfig(tempRootDir);
@@ -1395,7 +1397,9 @@ describe('RipGrepTool', () => {
     });
 
     it('should skip .geminiignore when disabled', async () => {
-      const geminiIgnorePath = path.join(tempRootDir, GEMINI_IGNORE_FILE_NAME);
+      const geminiIgnorePath = resolveToRealPath(
+        path.join(tempRootDir, GEMINI_IGNORE_FILE_NAME),
+      );
       await fs.writeFile(geminiIgnorePath, 'ignored.log');
       const configWithoutGeminiIgnore = createMockConfig(tempRootDir);
       vi.spyOn(
@@ -1813,7 +1817,18 @@ describe('resolveRipgrepPath', () => {
         );
       });
 
-      it('should resolve the SEA (flattened) path first', async () => {
+      it('should resolve the SEA (purely flattened) path first', async () => {
+        vi.mocked(fileExists).mockImplementation(async (checkPath) => {
+          const expectedTarget = path.resolve(__dirname, `rg-linux-x64`);
+          return checkPath.includes(expectedTarget);
+        });
+
+        const resolvedPath = await resolveRipgrepPath();
+        expect(resolvedPath).not.toBeNull();
+        expect(resolvedPath).toContain('rg-linux-x64');
+      });
+
+      it('should resolve the SEA (vendor subdirectory) path if purely flattened is missing', async () => {
         vi.mocked(fileExists).mockImplementation(async (checkPath) =>
           checkPath.includes(path.normalize('vendor/ripgrep')),
         );
@@ -1821,6 +1836,39 @@ describe('resolveRipgrepPath', () => {
         const resolvedPath = await resolveRipgrepPath();
         expect(resolvedPath).not.toBeNull();
         expect(resolvedPath).toContain(path.normalize('vendor/ripgrep'));
+      });
+
+      it('should resolve the Dev/Dist layout (actual output with src/) if SEA path is missing', async () => {
+        vi.mocked(fileExists).mockImplementation(async (checkPath) => {
+          // Normalize the expected check against the absolute resolved path logic
+          const expectedTarget = path.resolve(
+            __dirname,
+            '../../../vendor/ripgrep',
+          );
+          return checkPath.includes(expectedTarget);
+        });
+
+        const resolvedPath = await resolveRipgrepPath();
+        expect(resolvedPath).not.toBeNull();
+        expect(resolvedPath).toContain('vendor');
+      });
+
+      it('should resolve the Dev/Dist layout (assumed output without src/) if others are missing', async () => {
+        vi.mocked(fileExists).mockImplementation(async (checkPath) => {
+          const expectedTarget = path.resolve(
+            __dirname,
+            '../../vendor/ripgrep',
+          );
+          const skipTarget = path.resolve(__dirname, '../../../vendor/ripgrep');
+          return (
+            checkPath.includes(expectedTarget) &&
+            !checkPath.includes(skipTarget)
+          );
+        });
+
+        const resolvedPath = await resolveRipgrepPath();
+        expect(resolvedPath).not.toBeNull();
+        expect(resolvedPath).toContain('vendor');
       });
 
       it('should fall back to system PATH if both bundled paths are missing and system is trusted', async () => {
@@ -1858,6 +1906,13 @@ describe('resolveRipgrepPath', () => {
       it('should return null if binary is missing from both bundled paths and system PATH', async () => {
         vi.mocked(fileExists).mockResolvedValue(false);
         vi.mocked(resolveExecutable).mockReturnValue(undefined);
+
+        const resolvedPath = await resolveRipgrepPath();
+        expect(resolvedPath).toBeNull();
+      });
+
+      it('should handle errors gracefully and return null', async () => {
+        vi.mocked(fileExists).mockRejectedValue(new Error('File system error'));
 
         const resolvedPath = await resolveRipgrepPath();
         expect(resolvedPath).toBeNull();

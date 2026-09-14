@@ -86,10 +86,13 @@ import {
   isGemini2Model,
   PREVIEW_GEMINI_FLASH_MODEL,
   resolveModel,
+  setFlashModels,
+  DEFAULT_GEMINI_3_5_FLASH_MODEL,
+  SECONDARY_GEMINI_3_5_FLASH_MODEL,
 } from './models.js';
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
-import { ideContextStore } from '../ide/ideContext.js';
+import { checkPathTrust } from '../utils/trust.js';
 import { WriteTodosTool } from '../tools/write-todos.js';
 import {
   StandardFileSystemService,
@@ -177,6 +180,7 @@ import { startupProfiler } from '../telemetry/startupProfiler.js';
 import type { AgentDefinition } from '../agents/types.js';
 import { fetchAdminControls } from '../code_assist/admin/admin_controls.js';
 import { isSubpath, resolveToRealPath } from '../utils/paths.js';
+import { validatePath } from '../utils/path-validator.js';
 import { InjectionService } from './injectionService.js';
 import { ExecutionLifecycleService } from '../services/executionLifecycleService.js';
 import { WORKSPACE_POLICY_TIER } from '../policy/config.js';
@@ -676,6 +680,7 @@ export interface ConfigParameters {
   truncateToolOutputThreshold?: number;
   eventEmitter?: EventEmitter;
   useWriteTodos?: boolean;
+  env?: Record<string, string>;
   workspacePoliciesDir?: string;
   policyEngineConfig?: PolicyEngineConfig;
   directWebFetch?: boolean;
@@ -833,6 +838,7 @@ export class Config implements McpContext, AgentLoopContext {
   private ideMode: boolean;
 
   private _activeModel: string;
+  private fallbackOverrides = new Map<string, string>();
   private readonly maxSessionTurns: number;
   private readonly listSessions: boolean;
   private readonly deleteSession: string | undefined;
@@ -893,6 +899,7 @@ export class Config implements McpContext, AgentLoopContext {
   private readonly useTerminalBuffer: boolean;
   private readonly useRenderProcess: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
+  readonly env?: Record<string, string>;
   private readonly extensionManagement: boolean = true;
   private readonly extensionRegistryURI: string | undefined;
   private readonly truncateToolOutputThreshold: number;
@@ -1116,6 +1123,7 @@ export class Config implements McpContext, AgentLoopContext {
     this.checkpointing = params.checkpointing ?? false;
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
+    this.env = params.env;
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.model = params.model;
@@ -1332,6 +1340,7 @@ export class Config implements McpContext, AgentLoopContext {
         approvalMode: engineApprovalMode,
         disableAlwaysAllow: this.disableAlwaysAllow,
         sandboxManager: this._sandboxManager,
+        isTrustedFolder: () => this.isTrustedFolder(),
       },
       checkerRunner,
     );
@@ -1567,6 +1576,8 @@ export class Config implements McpContext, AgentLoopContext {
   ) {
     // Reset availability service when switching auth
     this.modelAvailabilityService.reset();
+    this.fallbackOverrides.clear();
+    this.modelConfigService.clearRuntimeOverrides();
 
     // Vertex and Genai have incompatible encryption and sending history with
     // thoughtSignature from Genai to Vertex will fail, we need to strip them
@@ -1828,6 +1839,8 @@ export class Config implements McpContext, AgentLoopContext {
     this._sessionId = sessionId;
     this.storage.setSessionId(sessionId);
     this.trackerService = undefined;
+    this.fallbackOverrides.clear();
+    this.modelConfigService.clearRuntimeOverrides();
     this.approvedPlanPath = undefined;
     this.topicState.reset();
     this.skillManager.reset();
@@ -1849,6 +1862,10 @@ export class Config implements McpContext, AgentLoopContext {
     if (previousPlansDir) {
       this.refreshSessionScopedPlansDirectory(previousPlansDir);
     }
+  }
+
+  rotateSessionId(sessionId: string): void {
+    this._sessionId = sessionId;
   }
 
   resetNewSessionState(sessionId: string): void {
@@ -1923,12 +1940,41 @@ export class Config implements McpContext, AgentLoopContext {
     this.modelAvailabilityService.reset();
   }
 
-  activateFallbackMode(model: string): void {
-    this.setModel(model, true);
+  activateFallbackMode(model: string, failedModel?: string): void {
+    debugLogger.log(
+      `Model fallback activated: switching from ${failedModel ?? 'unknown'} to ${model}`,
+    );
+    if (this.getActiveModel() !== model) {
+      this.setModel(model, true);
+    }
+    if (failedModel) {
+      // Chained fallback mitigation: If we already have overrides that point to the model
+      // that just failed, we need to update them to point to the new fallback model.
+      // e.g. A -> B, then B fails and we fallback to C. We must update A to point to C.
+      for (const [source, target] of this.fallbackOverrides.entries()) {
+        if (target === failedModel) {
+          this.fallbackOverrides.set(source, model);
+          this.modelConfigService.registerRuntimeModelOverride({
+            match: { model: source },
+            modelConfig: { model },
+          });
+        }
+      }
+
+      this.fallbackOverrides.set(failedModel, model);
+      this.modelConfigService.registerRuntimeModelOverride({
+        match: { model: failedModel },
+        modelConfig: { model },
+      });
+    }
     const authType = this.getContentGeneratorConfig()?.authType;
     if (authType) {
       logFlashFallback(this, new FlashFallbackEvent(authType));
     }
+  }
+
+  getFallbackOverride(model: string): string | undefined {
+    return this.fallbackOverrides.get(model);
   }
 
   getActiveModel(): string {
@@ -2019,10 +2065,10 @@ export class Config implements McpContext, AgentLoopContext {
     const primaryModel = resolveModel(
       model,
       this.getGemini31LaunchedSync(),
-      this.getGemini31FlashLiteLaunchedSync(),
       this.getUseCustomToolModelSync(),
       this.getHasAccessToPreviewModel(),
       this,
+      this.hasGemini35FlashGAAccess(),
     );
 
     const isPreview = isPreviewModel(primaryModel, this);
@@ -2059,10 +2105,10 @@ export class Config implements McpContext, AgentLoopContext {
     const primaryModel = resolveModel(
       this.getModel(),
       this.getGemini31LaunchedSync(),
-      this.getGemini31FlashLiteLaunchedSync(),
       this.getUseCustomToolModelSync(),
       this.getHasAccessToPreviewModel(),
       this,
+      this.hasGemini35FlashGAAccess(),
     );
     return this.modelQuotas.get(primaryModel)?.remaining;
   }
@@ -2075,10 +2121,10 @@ export class Config implements McpContext, AgentLoopContext {
     const primaryModel = resolveModel(
       this.getModel(),
       this.getGemini31LaunchedSync(),
-      this.getGemini31FlashLiteLaunchedSync(),
       this.getUseCustomToolModelSync(),
       this.getHasAccessToPreviewModel(),
       this,
+      this.hasGemini35FlashGAAccess(),
     );
     return this.modelQuotas.get(primaryModel)?.limit;
   }
@@ -2091,10 +2137,10 @@ export class Config implements McpContext, AgentLoopContext {
     const primaryModel = resolveModel(
       this.getModel(),
       this.getGemini31LaunchedSync(),
-      this.getGemini31FlashLiteLaunchedSync(),
       this.getUseCustomToolModelSync(),
       this.getHasAccessToPreviewModel(),
       this,
+      this.hasGemini35FlashGAAccess(),
     );
     return this.modelQuotas.get(primaryModel)?.resetTime;
   }
@@ -2277,6 +2323,11 @@ export class Config implements McpContext, AgentLoopContext {
             continue;
           }
 
+          let modelId = bucket.modelId;
+          if (modelId === SECONDARY_GEMINI_3_5_FLASH_MODEL) {
+            modelId = DEFAULT_GEMINI_3_5_FLASH_MODEL;
+          }
+
           let remaining: number;
           let limit: number;
 
@@ -2285,7 +2336,7 @@ export class Config implements McpContext, AgentLoopContext {
             limit =
               bucket.remainingFraction > 0
                 ? Math.round(remaining / bucket.remainingFraction)
-                : (this.modelQuotas.get(bucket.modelId)?.limit ?? 0);
+                : (this.modelQuotas.get(modelId)?.limit ?? 0);
           } else {
             // Server only sent remainingFraction — use a normalized scale.
             limit = 100;
@@ -2293,7 +2344,7 @@ export class Config implements McpContext, AgentLoopContext {
           }
 
           if (!isNaN(remaining) && Number.isFinite(limit) && limit > 0) {
-            this.modelQuotas.set(bucket.modelId, {
+            this.modelQuotas.set(modelId, {
               remaining,
               limit,
               resetTime: bucket.resetTime,
@@ -3109,13 +3160,24 @@ export class Config implements McpContext, AgentLoopContext {
    * 'false' for untrusted.
    */
   isTrustedFolder(): boolean {
-    const context = ideContextStore.get();
-    if (context?.workspaceState?.isTrusted !== undefined) {
-      return context.workspaceState.isTrusted;
+    const { isTrusted, source } = checkPathTrust({
+      path: this.targetDir,
+      isFolderTrustEnabled: this.folderTrust,
+    });
+
+    if (isTrusted === false) {
+      return false;
     }
 
-    // Default to untrusted if folder trust is enabled and no explicit value is set.
-    return this.folderTrust ? (this.trustedFolder ?? false) : true;
+    if (source === 'env') {
+      return isTrusted;
+    }
+
+    if (this.trustedFolder !== undefined) {
+      return this.trustedFolder;
+    }
+
+    return isTrusted ?? false;
   }
 
   setIdeMode(value: boolean): void {
@@ -3299,6 +3361,11 @@ export class Config implements McpContext, AgentLoopContext {
     absolutePath: string,
     checkType: 'read' | 'write' = 'write',
   ): string | null {
+    const pathValidation = validatePath(absolutePath);
+    if (!pathValidation.isValid) {
+      return `Invalid path: ${pathValidation.error}`;
+    }
+
     if (checkType === 'write' && hasScopedAutoMemoryExtractionWriteAccess()) {
       const resolvedPath = resolveToRealPath(absolutePath);
       if (
@@ -3477,15 +3544,6 @@ export class Config implements McpContext, AgentLoopContext {
   }
 
   /**
-   * Returns whether Gemini 3.1 Flash Lite has been launched.
-   * This method is async and ensures that experiments are loaded before returning the result.
-   */
-  async getGemini31FlashLiteLaunched(): Promise<boolean> {
-    await this.ensureExperimentsLoaded();
-    return this.getGemini31FlashLiteLaunchedSync();
-  }
-
-  /**
    * Returns whether the custom tool model should be used.
    */
   async getUseCustomToolModel(): Promise<boolean> {
@@ -3511,6 +3569,38 @@ export class Config implements McpContext, AgentLoopContext {
       authType === AuthType.USE_VERTEX_AI ||
       authType === AuthType.GATEWAY
     );
+  }
+
+  /**
+   * Returns whether Gemini 3.5 Flash GA has been launched.
+   *
+   * Note: This method should only be called after startup, once experiments have been loaded.
+   */
+  hasGemini35FlashGAAccess(): boolean {
+    const authType = this.contentGeneratorConfig?.authType;
+    const hasAccess = (() => {
+      if (this.isGemini31LaunchedForAuthType(authType)) {
+        return true;
+      }
+      return (
+        this.experiments?.flags[ExperimentFlags.GEMINI_3_5_FLASH_GA_LAUNCHED]
+          ?.boolValue ?? false
+      );
+    })();
+    // Used to set default flash models based on access
+    // TODO: Remove once the experiment for 3_5 flash rollut can be cleaned up.
+    if (hasAccess) {
+      // Gemini API key users should have the ability to manually select the
+      // old preview flash model.
+      if (authType === AuthType.USE_GEMINI) {
+        setFlashModels('gemini-3-flash-preview', 'gemini-3.5-flash');
+      } else {
+        setFlashModels('gemini-3.5-flash', 'gemini-3.5-flash');
+      }
+    } else {
+      setFlashModels('gemini-3-flash-preview', 'gemini-2.5-flash');
+    }
+    return hasAccess;
   }
 
   /**
@@ -3544,24 +3634,6 @@ export class Config implements McpContext, AgentLoopContext {
       }
     }
     return undefined;
-  }
-
-  /**
-   * Returns whether Gemini 3.1 Flash Lite has been launched.
-   *
-   * Note: This method should only be called after startup, once experiments have been loaded.
-   * If you need to call this during startup or from an async context, use
-   * getGemini31FlashLiteLaunched instead.
-   */
-  getGemini31FlashLiteLaunchedSync(): boolean {
-    const authType = this.contentGeneratorConfig?.authType;
-    if (this.isGemini31LaunchedForAuthType(authType)) {
-      return true;
-    }
-    return (
-      this.experiments?.flags[ExperimentFlags.GEMINI_3_1_FLASH_LITE_LAUNCHED]
-        ?.boolValue ?? false
-    );
   }
 
   /**

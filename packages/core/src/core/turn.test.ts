@@ -18,7 +18,6 @@ import {
   StreamEventType,
   type GeminiChat,
 } from './geminiChat.js';
-import { LlmRole } from '../telemetry/types.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -123,7 +122,8 @@ describe('Turn', () => {
         reqParts,
         'prompt-id-1',
         expect.any(AbortSignal),
-        LlmRole.MAIN,
+        'main',
+        undefined,
         undefined,
       );
 
@@ -254,7 +254,15 @@ describe('Turn', () => {
         events.push(event);
       }
 
-      expect(events).toEqual([{ type: GeminiEventType.InvalidStream }]);
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.InvalidStream,
+          value: {
+            type: 'NO_FINISH_REASON',
+            message: 'Test invalid stream',
+          },
+        },
+      ]);
       expect(turn.getDebugResponses().length).toBe(0);
       expect(reportError).not.toHaveBeenCalled(); // Should not report as error
     });

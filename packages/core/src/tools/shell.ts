@@ -48,14 +48,22 @@ import { SHELL_TOOL_NAME } from './tool-names.js';
 import { PARAM_ADDITIONAL_PERMISSIONS } from './definitions/base-declarations.js';
 import { ApprovalMode } from '../policy/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  extractUntrustedContext,
+  findUntrustedFlags,
+  isBuildOrTestCommand,
+  getModifiedBuildFiles,
+} from '../utils/untrustedContextTracker.js';
 import { getShellDefinition } from './definitions/coreTools.js';
 import { resolveToolDeclaration } from './definitions/resolver.js';
 import type { AgentLoopContext } from '../config/agent-loop-context.js';
+import type { Content } from '@google/genai';
 import { toPathKey, isSubpath, resolveToRealPath } from '../utils/paths.js';
 import {
   getProactiveToolSuggestions,
   isNetworkReliantCommand,
 } from '../sandbox/utils/proactivePermissions.js';
+import { wrapUntrusted } from '../utils/textUtils.js';
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 export const LIVE_OUTPUT_MAX_BUFFER_CHARS = 100_000;
@@ -108,15 +116,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Wraps a command in a subshell `()` to capture background process IDs (PIDs) using pgrep.
-   * Uses newlines to prevent breaking heredocs or trailing comments.
+   * Wraps a command in a subshell to capture background process IDs (PIDs)
+   * using an EXIT trap. Uses newlines to prevent breaking heredocs or trailing
+   * comments.
    *
    * @param command The raw command string to execute.
    * @param tempFilePath Path to the temporary file where PIDs will be written.
    * @param isWindows Whether the current platform is Windows (if true, the command is returned as-is).
    * @returns The wrapped command string.
    */
-  private wrapCommandForPgrep(
+  private wrapCommandForBackgroundPIDs(
     command: string,
     tempFilePath: string,
     isWindows: boolean,
@@ -132,7 +141,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       trimmed += ' ';
     }
     const escapedTempFilePath = escapeShellArg(tempFilePath, 'bash');
-    return `(\n${trimmed}\n)\n__code=$?; pgrep -g 0 >${escapedTempFilePath} 2>&1; exit $__code;`;
+    return `_bgpids_file=${escapedTempFilePath}\n(\n  trap 'jobs -p > "$_bgpids_file"' EXIT\n${trimmed}\n)\n__code=$?\nexit $__code`;
   }
 
   private getContextualDetails(): string {
@@ -244,6 +253,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return this.params.command;
   }
 
+  private getHistory(): readonly Content[] {
+    const clientFromProp = this.context.geminiClient;
+    if (clientFromProp && typeof clientFromProp.getHistory === 'function') {
+      return clientFromProp.getHistory();
+    }
+    const clientFromMethod = this.context.config?.getGeminiClient?.();
+    if (clientFromMethod && typeof clientFromMethod.getHistory === 'function') {
+      return clientFromMethod.getHistory();
+    }
+    return [];
+  }
+
   override getExplanation(): string {
     return this.getContextualDetails().trim();
   }
@@ -256,6 +277,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       outcome === ToolConfirmationOutcome.ProceedAlways
     ) {
       const command = stripShellWrapper(this.params.command);
+      const history = this.getHistory();
+      const untrustedContext = extractUntrustedContext(history);
+      const untrustedFlags = findUntrustedFlags(command, untrustedContext);
+      const modifiedBuildFiles = getModifiedBuildFiles(this.context.config);
+      const isBuildCmd = isBuildOrTestCommand(command);
+      if (
+        untrustedFlags.length > 0 ||
+        (isBuildCmd && modifiedBuildFiles.length > 0)
+      ) {
+        return undefined;
+      }
       const rootCommands = [...new Set(getCommandRoots(command))];
       const allowRedirection = hasRedirection(command) ? true : undefined;
 
@@ -271,6 +303,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
     abortSignal: AbortSignal,
     forcedDecision?: ForcedToolDecision,
   ): Promise<ToolCallConfirmationDetails | false> {
+    if (forcedDecision === 'deny') {
+      return super.shouldConfirmExecute(abortSignal, forcedDecision);
+    }
+
+    const command = stripShellWrapper(this.params.command);
+    const history = this.getHistory();
+    const untrustedContext = extractUntrustedContext(history);
+    const untrustedFlags = findUntrustedFlags(command, untrustedContext);
+    const modifiedBuildFiles = getModifiedBuildFiles(this.context.config);
+    const isBuildCmd = isBuildOrTestCommand(command);
+
+    if (
+      untrustedFlags.length > 0 ||
+      (isBuildCmd && modifiedBuildFiles.length > 0)
+    ) {
+      return this.getConfirmationDetails(abortSignal);
+    }
+
     if (this.context.config.getApprovalMode() === ApprovalMode.YOLO) {
       return super.shouldConfirmExecute(abortSignal, forcedDecision);
     }
@@ -407,6 +457,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const rootCommands = [...new Set(getCommandRoots(command))];
     const rootCommand = rootCommands[0] || 'shell';
 
+    const history = this.getHistory();
+    const untrustedContext = extractUntrustedContext(history);
+    const untrustedFlags = findUntrustedFlags(command, untrustedContext);
+    const modifiedBuildFiles = getModifiedBuildFiles(this.context.config);
+    const isBuildCmd = isBuildOrTestCommand(command);
+
+    const hasSecurityWarning =
+      untrustedFlags.length > 0 ||
+      (isBuildCmd && modifiedBuildFiles.length > 0);
+
     // Proactively suggest expansion for known network-heavy tools (npm install, etc.)
     // to avoid hangs when network is restricted by default.
     const effectiveAdditionalPermissions =
@@ -415,8 +475,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Rely entirely on PolicyEngine for interactive confirmation.
     // If we are here, it means PolicyEngine returned ASK_USER (or no message bus),
     // so we must provide confirmation details.
-    // If additional_permissions are provided, it's an expansion request
-    if (effectiveAdditionalPermissions) {
+    // If additional_permissions are provided, and no security warnings are present,
+    // it's an expansion request
+    if (effectiveAdditionalPermissions && !hasSecurityWarning) {
       return {
         type: 'sandbox_expansion',
         title: proactivePermissions
@@ -447,6 +508,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       command: this.params.command,
       rootCommand: rootCommandDisplay,
       rootCommands,
+      untrustedFlags: untrustedFlags.length > 0 ? untrustedFlags : undefined,
+      modifiedBuildFiles:
+        isBuildCmd && modifiedBuildFiles.length > 0
+          ? modifiedBuildFiles
+          : undefined,
       onConfirm: async (_outcome: ToolConfirmationOutcome) => {
         // Policy updates are now handled centrally by the scheduler
       },
@@ -497,10 +563,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const onAbort = () => combinedController.abort();
     try {
       tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-shell-'));
-      tempFilePath = path.join(tempDir, 'pgrep.tmp');
+      tempFilePath = path.join(tempDir, 'bgpids.tmp');
 
-      // pgrep is not available on Windows, so we can't get background PIDs
-      const commandToExecute = this.wrapCommandForPgrep(
+      // Windows shells do not support the POSIX jobs output used here.
+      const commandToExecute = this.wrapCommandForBackgroundPIDs(
         strippedCommand,
         tempFilePath,
         isWindows,
@@ -651,9 +717,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
           },
           combinedController.signal,
-          this.context.config.getEnableInteractiveShell(),
+          this.context.config.isInteractiveShellEnabled(),
           {
             ...shellExecutionConfig,
+            env: this.context.config.env,
             sessionId: this.context.config?.getSessionId?.() ?? 'default',
             pager: 'cat',
             sanitizationConfig:
@@ -736,12 +803,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
 
         if (tempFileExists) {
-          const pgrepContent = await fsPromises.readFile(tempFilePath, 'utf8');
-          const pgrepLines = pgrepContent
+          const backgroundPIDContent = await fsPromises.readFile(
+            tempFilePath,
+            'utf8',
+          );
+          const backgroundPIDLines = backgroundPIDContent
             .split('\n')
             .map((line) => line.trim())
             .filter(Boolean);
-          for (const line of pgrepLines) {
+          for (const line of backgroundPIDLines) {
             if (!/^\d+$/.test(line)) {
               if (
                 line.includes('sysmond service not found') ||
@@ -750,7 +820,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               ) {
                 continue;
               }
-              debugLogger.error(`pgrep: ${line}`);
+              debugLogger.error(`background pid output: ${line}`);
             }
             const pid = Number(line);
             if (pid !== result.pid) {
@@ -759,7 +829,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           }
         } else {
           if (!signal.aborted && !result.backgrounded) {
-            debugLogger.error('missing pgrep output');
+            debugLogger.error('missing background pid output');
           }
         }
       }
@@ -1021,7 +1091,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           signal,
         );
         return {
-          llmContent: summary,
+          llmContent: wrapUntrusted(summary),
           returnDisplay,
           ...executionError,
         };
@@ -1034,7 +1104,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           : undefined;
 
       return {
-        llmContent,
+        llmContent: wrapUntrusted(llmContent),
         display: {
           name: 'Shell',
           description: this.getDescription(),
@@ -1057,18 +1127,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
       signal.removeEventListener('abort', onAbort);
       timeoutController.signal.removeEventListener('abort', onAbort);
-      if (tempFilePath) {
-        try {
-          await fsPromises.unlink(tempFilePath);
-        } catch {
-          // Ignore errors during unlink
+
+      // Only clean up if NOT running in background.
+      // Background processes need the temp directory and PID file to remain
+      // available until they exit.
+      if (!this.params.is_background) {
+        if (tempFilePath) {
+          try {
+            await fsPromises.unlink(tempFilePath);
+          } catch {
+            // Ignore errors during unlink
+          }
         }
-      }
-      if (tempDir) {
-        try {
-          await fsPromises.rm(tempDir, { recursive: true, force: true });
-        } catch {
-          // Ignore errors during rm
+        if (tempDir) {
+          try {
+            await fsPromises.rm(tempDir, { recursive: true, force: true });
+          } catch {
+            // Ignore errors during rm
+          }
         }
       }
     }
@@ -1089,7 +1165,7 @@ export class ShellTool extends BaseDeclarativeTool<
       // Errors are surfaced when parsing commands.
     });
     const definition = getShellDefinition(
-      context.config.getEnableInteractiveShell(),
+      context.config.isInteractiveShellEnabled(),
       context.config.getEnableShellOutputEfficiency(),
       context.config.getSandboxEnabled(),
     );
@@ -1139,7 +1215,7 @@ export class ShellTool extends BaseDeclarativeTool<
 
   override getSchema(modelId?: string) {
     const definition = getShellDefinition(
-      this.context.config.getEnableInteractiveShell(),
+      this.context.config.isInteractiveShellEnabled(),
       this.context.config.getEnableShellOutputEfficiency(),
       this.context.config.getSandboxEnabled(),
     );
