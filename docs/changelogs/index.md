@@ -18,6 +18,133 @@ on GitHub.
 | [Preview](preview.md) | Experimental features ready for early feedback. |
 | [Stable](latest.md)   | Stable, recommended for general use.            |
 
+## Announcements: v0.67.0 - 2026-11-04
+
+- **Model Discovery Command:** Added a new `models` command and `--list-models`
+  flag for discovering available models directly from the CLI
+  ([#29880](https://github.com/google-gemini/gemini-cli/pull/29880) by
+  @urielefrenvirtusa).
+- **Container Sandbox IDE Bridging:** Enabled bridging the IDE companion into
+  container sandboxes over exec stdio to improve IDE integration in
+  containerized environments
+  ([#29858](https://github.com/google-gemini/gemini-cli/pull/29858) by
+  @elberthc-byte).
+- **Cancellation & Signal Resilience:** Improved termination signal handling and
+  prevented post-cancellation tool execution and continuation stream processing
+  ([#29849](https://github.com/google-gemini/gemini-cli/pull/29849) by
+  @urielefrenvirtusa,
+  [#29868](https://github.com/google-gemini/gemini-cli/pull/29868) by
+  @jesussamuel-byte).
+
+## Announcements: v0.66.0 - 2026-10-27
+
+- **Terminal UI Rendering & Flicker Prevention:** Implemented synchronized
+  output mode and isolated spinner rendering, eliminated buffer flickering, and
+  preserved terminal scrollback during viewport refreshes
+  ([#29725](https://github.com/google-gemini/gemini-cli/pull/29725) by
+  @diegogodinezr,
+  [#29695](https://github.com/google-gemini/gemini-cli/pull/29695) by
+  @ugorla-dev).
+- **Tool Scheduling & Process Lifecycle:** Emitted tool call groups directly
+  from the scheduler and forwarded process termination signals from bootstrap
+  parent to child processes
+  ([#29736](https://github.com/google-gemini/gemini-cli/pull/29736) by
+  @jesussamuel-byte,
+  [#29790](https://github.com/google-gemini/gemini-cli/pull/29790) by
+  @villahernandez-coder).
+- **Environment & MCP OAuth Security:** Supported opt-in private network
+  endpoints for MCP OAuth flows and preserved user-level git configuration while
+  suppressing interactive prompts
+  ([#29844](https://github.com/google-gemini/gemini-cli/pull/29844) by
+  @luisfelipe-alt,
+  [#29832](https://github.com/google-gemini/gemini-cli/pull/29832) by
+  @jesussamuel-byte).
+
+## Announcements: v0.65.0 - 2026-10-20
+
+- **Custom Telemetry Headers:** Added support for configuring custom OTLP
+  headers in telemetry configuration
+  ([#29641](https://github.com/google-gemini/gemini-cli/pull/29641) by
+  @jesussamuel-byte).
+- **Filesystem & Traversal Performance:** Optimized ignore pattern filtering
+  with subtree pruning and deferred recursive file reads for directory
+  references ([#29582](https://github.com/google-gemini/gemini-cli/pull/29582)
+  by @amelidev, [#29617](https://github.com/google-gemini/gemini-cli/pull/29617)
+  by @jvargassanchez-dot).
+- **Workspace Security & Session Resilience:** Enforced read-only workspace
+  settings in untrusted folders, resolved infinite OAuth retry loops, and
+  prevented session poisoning on rapid Ctrl+C interruptions
+  ([#29583](https://github.com/google-gemini/gemini-cli/pull/29583) by
+  @jvargassanchez-dot,
+  [#29655](https://github.com/google-gemini/gemini-cli/pull/29655) by
+  @villahernandez-coder).
+
+## Announcements: v0.64.0 - 2026-10-13
+
+- **Atomic Operations & State Persistence:** Serialized file tool operations
+  with atomic writes and introduced atomic CLI state persistence with automatic
+  recovery from backup on corruption
+  ([#29499](https://github.com/google-gemini/gemini-cli/pull/29499) by
+  @elberthc-byte,
+  [#29558](https://github.com/google-gemini/gemini-cli/pull/29558) by
+  @urielefrenvirtusa).
+- **Chat Recording Optimization:** Implemented append-only delta patching and
+  bounded history windowing in ChatRecordingService to optimize memory and disk
+  efficiency during long-running sessions
+  ([#29568](https://github.com/google-gemini/gemini-cli/pull/29568) by
+  @jvargassanchez-dot).
+- **CLI Interaction & Input Robustness:** Resolved `@file:line` references,
+  prevented CPU hangs on `@` in code blocks, and ensured Ctrl+C emergency aborts
+  reliably reach cancellation handlers
+  ([#29581](https://github.com/google-gemini/gemini-cli/pull/29581) by
+  @jesussamuel-byte,
+  [#29586](https://github.com/google-gemini/gemini-cli/pull/29586) by
+  @urielefrenvirtusa).
+
+## Announcements: v0.63.0 - 2026-10-06
+
+- **Autonomous Plan Execution:** Enabled autonomous plan execution in
+  non-interactive mode to support unattended agent workflows
+  ([#29539](https://github.com/google-gemini/gemini-cli/pull/29539) by
+  @urielefrenvirtusa).
+- **Core Stability and Memory Lifecycle:** Bounded tool output sizes and
+  optimized memory management in long-running agent loops while preventing
+  infinite authentication loops across headless and supervisor environments
+  ([#29451](https://github.com/google-gemini/gemini-cli/pull/29451) by
+  @diegogodinezr,
+  [#29448](https://github.com/google-gemini/gemini-cli/pull/29448) by
+  @villahernandez-coder).
+
+## Announcements: v0.61.0 - 2026-09-23
+
+- **Core Security Hardening:** Prevented indirect prompt injection
+  vulnerabilities via build file modifications and untrusted flags, while
+  hardening filesystem boundaries and isolating runtime state
+  ([#29250](https://github.com/google-gemini/gemini-cli/pull/29250) by
+  @villahernandez-coder,
+  [#29214](https://github.com/google-gemini/gemini-cli/pull/29214) by
+  @diegogodinezr).
+- **Agent Loop and Model Stability:** Ensured AgentLoopContext state
+  preservation across spread operations and preserved explicit versioned Flash
+  model IDs ([#29335](https://github.com/google-gemini/gemini-cli/pull/29335) by
+  @diegogodinezr,
+  [#29252](https://github.com/google-gemini/gemini-cli/pull/29252) by
+  @SandyTao520).
+
+## Announcements: v0.60.0 - 2026-09-15
+
+- **Extension & Tool Safety Hardening:** Prompt for user consent on environment
+  changes and sanitize runtime-altering environment variables, while enforcing
+  envelope metadata provenance for untrusted tool outputs
+  ([#28863](https://github.com/google-gemini/gemini-cli/pull/28863) by
+  @amelidev, [#29215](https://github.com/google-gemini/gemini-cli/pull/29215) by
+  @luisfelipe-alt).
+- **Sandbox Directory Isolation:** Isolated settings and temporary directories
+  inside sandbox containers, including the macOS Seatbelt sandbox
+  ([#29171](https://github.com/google-gemini/gemini-cli/pull/29171),
+  [#29216](https://github.com/google-gemini/gemini-cli/pull/29216) by
+  @jvargassanchez-dot).
+
 ## Announcements: v0.59.0 - 2026-09-08
 
 - **MCP OAuth SSRF Mitigation:** Prevented Server-Side Request Forgery (SSRF)

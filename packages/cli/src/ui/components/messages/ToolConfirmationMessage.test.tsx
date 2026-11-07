@@ -1009,5 +1009,71 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('BUILD');
       unmount();
     });
+
+    it('should list each modified build file name once in the caution warning', async () => {
+      const confirmationDetails: SerializableConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'npm test',
+        rootCommand: 'npm',
+        rootCommands: ['npm'],
+        modifiedBuildFiles: [
+          '/workspace/package.json',
+          '/workspace/packages/core/package.json',
+          '/workspace/BUILD',
+        ],
+      };
+
+      const { lastFrame, unmount } = await renderWithProviders(
+        <ToolConfirmationMessage
+          callId="test-build-mod-dedup-exec"
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          getPreferredEditor={vi.fn()}
+          availableTerminalHeight={30}
+          terminalWidth={120}
+          toolName="run_shell_command"
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain(
+        'CAUTION: Build Configuration Was Recently Modified',
+      );
+      expect(frame.match(/package\.json/g)).toHaveLength(1);
+      expect(frame).toContain('BUILD');
+      unmount();
+    });
+  });
+
+  describe('narrow and negative terminal widths for edit confirmations', () => {
+    const editConfirmationDetails: SerializableConfirmationDetails = {
+      type: 'edit',
+      title: 'Confirm Edit',
+      fileName: 'test.txt',
+      filePath: '/test.txt',
+      fileDiff: '--- a/test.txt\n+++ b/test.txt\n@@ -1 +1 @@\n-old\n+new',
+      originalContent: 'old',
+      newContent: 'new',
+    };
+
+    it.each([-5, -1, 0, 1, 2, 4, 10])(
+      'renders edit confirmation without throwing RangeError when terminalWidth is %i',
+      async (terminalWidth) => {
+        const { lastFrame, unmount } = await renderWithProviders(
+          <ToolConfirmationMessage
+            callId="test-narrow-edit"
+            confirmationDetails={editConfirmationDetails}
+            config={mockConfig}
+            getPreferredEditor={vi.fn()}
+            availableTerminalHeight={30}
+            terminalWidth={terminalWidth}
+            toolName="edit"
+          />,
+        );
+        expect(lastFrame()).toBeDefined();
+        unmount();
+      },
+    );
   });
 });
